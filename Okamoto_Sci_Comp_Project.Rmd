@@ -1,0 +1,160 @@
+---
+title: "Scientific Computing for Biologists Final Project: RNA-seq in Mouse Digits"
+author: "Alexander Okamoto"
+date: "3/16/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Project Goals
+
+For my senior thesis project, I am working to understand pectoral fin development in zebrafish through RNA-seq experiments. Since my data has not yet arrived back from the sequencing center, I am working with a dataset provided by Tom Stewart, a postdoc in the Shubin lab. This is a RNA-seq dataset for each digit in developing mouse embryos at stage E13.5. Sequenced reads were already mapped to the mouse genome assembly GRCm38 with Ensembl annotation v85. The manuscript for this project is available at <https://www.biorxiv.org/content/early/2017/12/05/224147>. Gene identities were downloaded from Ensembl.
+
+**My goals for the project are to:**
+
+1. Normalize the data for each gene per million transcripts
+2. Perform principle component analysis to determine clustering of mouse digit transcriptomes
+3. Identify most differentially expressed genes between digit types
+4. Create heatmap for most differentially expressed genes
+5. Graph expression profiles of most differentially expressed genes
+
+
+```{r}
+#load packages for project
+library(ggplot2) #for data visualization
+library(tidyr) # for organizing data 
+library(dplyr) # for rename function
+library(factoextra) #to visualize PCA analysis data
+source("https://bioconductor.org/biocLite.R")
+biocLite("edgeR") #to determine differential gene expression
+library(edgeR)
+library(Rmisc) #to calculate standard error
+```
+**1. Normalize the data for each gene per million transcripts**
+
+```{r}
+#import datafile on mouse embryo digit expression at stage E13.5
+seq_data <- read.delim("mm_HTSeq_upload (1).txt")
+#import gene references information
+all_mouse_genes <- read.csv("mart_export (1).txt", header = TRUE)
+#import average gene length for normalization
+gene_length_mm <- read.delim('mus_gene_length_median.txt', header = FALSE)
+
+#create master dataset through mm_gene_id shared column
+names(gene_length_mm) <- c("mm_gene_id","avg_len")
+all_mouse_genes <- rename(all_mouse_genes, replace = c("Gene_stable_ID"="mm_gene_id"))
+data <- inner_join(seq_data, all_mouse_genes)
+data <- inner_join(data, gene_length_mm)
+data$mm_gene_id <- NULL #remove joining variable
+rm(all_mouse_genes) 
+rm(gene_length_mm)
+```
+
+```{r}
+# CALCULATING TPM to normalize sequence reads per gene length and total number of reads 
+fn.TPM_mm <-function(sample) {
+  (sample*75*10^6)/(data$avg_len*sum((sample*75)/data$avg_len))
+}
+TPM_mm <- as.data.frame(sapply(data[1:(length(data)-2)], fn.TPM_mm))
+TPM_mm<- as.data.frame(sqrt(TPM_mm))
+data[1:15] <- data.frame(TPM_mm)
+data <- data[rowSums(data[c(-16,-17)])>0, ] #remove all rows for genes that are not expressed in any sample
+rm(TPM_mm) #cleaning environment
+```
+Data is cleaned, compiled into a single element and converted into transcripts per million for each gene with at least some expression in this dataset. 
+
+
+**2. Perform Principle Component Analysis on Samples**
+```{r}
+#perform principle component analysis
+PCA <-prcomp(t(data[,1:15]))
+#graph PCA axes
+fviz_eig(PCA)
+data_groups <- c("1", "1","1","2","2","2","3", "3","3","4","4","4","5", "5","5")
+#graph PC1 vs PC2
+fviz_pca_ind(PCA, geom = c("point", "text"),
+       label = "all", invisible = "none", labelsize = 4,
+       pointsize = 2, habillage=data_groups) + labs(title ="PCA", x = "PC1", y = "PC2")
+
+```
+
+
+This plot shows that digit one has a distinct expression profile, while the other digits do not. Now to find the most differentially expressed genes, I will compare the first and second digits (as the first digit is the only one with a distinct gene expression profile as shown by the PCA).
+
+**3. Identify most differentially expressed genes**
+
+```{r}
+exp_groups <- c(1,1,1,2,2,2)
+#calculate differential expression
+dif_exp <- DGEList(counts=data[2:7], group = exp_groups, genes = data$Gene_name)
+dif_exp <- estimateDisp(dif_exp)
+dif_exp <- estimateCommonDisp(dif_exp)
+dif_exp <- estimateTagwiseDisp(dif_exp)
+dif_exp_test <- exactTest(dif_exp)
+top_genes <- topTags(dif_exp_test, sort.by="PValue") #identify top dif expressed genes
+print(top_genes)
+top_gene_names <- c("Pax9", "Tbx15", "Hoxd12", "Mir3084-2", "Hoxd11", "Tbx3os1", "Tbx5", "Hoxd10", "Snord93", "Mir7025") #based on top gene results (lowest PValues)
+
+top_gene_data <- data[data$Gene_name %in% top_gene_names,]
+#time to tidy the top gene data
+top_gene_data$avg_len <- NULL #remove joining variable
+
+top_gene_tidy <- top_gene_data %>% gather(key = 'Sample', value = 'Expression', mm_FL_D1_1:mm_FL_D5_3)
+```
+**4. Create a heatmap in ggplot2 to analyze differential gene expression**
+
+
+```{r}
+#create heatmap of most differentially expressed genes
+ggplot(top_gene_tidy, aes(Sample, Gene_name )) +
+geom_tile(aes(fill = Expression), color = "white") +
+scale_fill_gradient(low = "white", high = "steelblue") +
+ylab("List of genes ") +
+xlab("Samples") +
+theme(legend.title = element_text(size = 10),
+        legend.text = element_text(size = 12),
+        plot.title = element_text(size=16),
+        axis.title=element_text(size=14,face="bold"),
+        axis.text.x = element_text(angle = 90, hjust = 1)) +
+labs(fill = "Expression level") + xlab("Digit Sample") + ggtitle("Heatmap of Top 10 Differentially Expressed Genes")
+```
+
+
+**5. Graph expression profiles of most differentially expressed genes**
+```{r}
+
+#creates graphs of expression across the limb bud
+
+#tidy data for analysis
+top_gene_tidy$Sample[top_gene_tidy$Sample == "mm_FL_D1_1"] <-1
+top_gene_tidy$Sample[top_gene_tidy$Sample == "mm_FL_D1_2"] <-1
+top_gene_tidy$Sample[top_gene_tidy$Sample == "mm_FL_D1_3"] <-1
+top_gene_tidy$Sample[top_gene_tidy$Sample == "mm_FL_D2_1"] <-2
+top_gene_tidy$Sample[top_gene_tidy$Sample == "mm_FL_D2_2"] <-2
+top_gene_tidy$Sample[top_gene_tidy$Sample == "mm_FL_D2_3"] <-2
+top_gene_tidy$Sample[top_gene_tidy$Sample == "mm_FL_D3_1"] <-3
+top_gene_tidy$Sample[top_gene_tidy$Sample == "mm_FL_D3_2"] <-3
+top_gene_tidy$Sample[top_gene_tidy$Sample == "mm_FL_D3_3"] <-3
+top_gene_tidy$Sample[top_gene_tidy$Sample == "mm_FL_D4_1"] <-4
+top_gene_tidy$Sample[top_gene_tidy$Sample == "mm_FL_D4_2"] <-4
+top_gene_tidy$Sample[top_gene_tidy$Sample == "mm_FL_D4_3"] <-4
+top_gene_tidy$Sample[top_gene_tidy$Sample == "mm_FL_D5_1"] <-5
+top_gene_tidy$Sample[top_gene_tidy$Sample == "mm_FL_D5_2"] <-5
+top_gene_tidy$Sample[top_gene_tidy$Sample == "mm_FL_D5_3"] <-5
+
+#calculate standard error of each sample
+top_gene_summary <- summarySE(top_gene_tidy, measurevar="Expression", groupvars=c("Gene_name","Sample"))
+
+# Plot standard error of the mean
+ggplot(top_gene_summary, aes(x=as.numeric(Sample), y=Expression, colour=Gene_name)) + 
+    geom_errorbar(aes(ymin=Expression-se, ymax=Expression+se), width=.1) +
+    geom_line() +
+    geom_point() + xlab("Digit Number") + ylab("Expression in TPM") + ggtitle("Expression of 10 differentially expressed genes in the mouse hand")
+```
+
+**Conclusion**
+
+The most significantly differentially expressed genes generally are differentially expressed between the first digit and the remaining 4 posterior digits as shown by the heat map and gene expression plot. In particular, Tbx5 and Pax9 are strongly upregulated in digit 1 while Hoxd10, Hoxd11, Hoxd12 and Tbx15 are downregulated. This suggests that digit 1 has a distinct expression profile while digits 2-5 share similar gene expression profiles.
